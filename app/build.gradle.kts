@@ -12,13 +12,30 @@ android {
         // Android 11+: needed for WindowManager.maximumWindowMetrics and overlay cutout mode
         minSdk = 30
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0"
+        // Every GitHub build gets a higher number, so phones accept it as an update.
+        val build = System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull() ?: 1
+        versionCode = build
+        versionName = "1.0.$build"
+    }
+
+    // The same key must sign every release, or Android refuses to update the app.
+    // GitHub Actions provides it from repository secrets (see README).
+    val keystore = System.getenv("SIGNING_KEYSTORE")
+    signingConfigs {
+        if (keystore != null) {
+            create("release") {
+                storeFile = file(keystore)
+                storePassword = System.getenv("SIGNING_PASSWORD")
+                keyAlias = "taobaotranslate"
+                keyPassword = System.getenv("SIGNING_PASSWORD")
+            }
+        }
     }
 
     buildTypes {
         release {
             isMinifyEnabled = false
+            if (keystore != null) signingConfig = signingConfigs.getByName("release")
         }
     }
 

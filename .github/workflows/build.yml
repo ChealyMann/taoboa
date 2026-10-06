@@ -5,6 +5,9 @@ on:
     branches: [main, master]
   workflow_dispatch:   # lets you start a build by hand from the Actions tab
 
+permissions:
+  contents: write      # needed to publish the release
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -23,10 +26,34 @@ jobs:
       - name: Accept Android SDK licenses
         run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
 
-      - name: Build debug APK
-        run: gradle assembleDebug --no-daemon
+      - name: Load signing key
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+        run: |
+          if [ -z "$KEYSTORE_BASE64" ]; then
+            echo "::error::Missing the KEYSTORE_BASE64 and KEYSTORE_PASSWORD repository secrets. See README, 'Automatic updates'."
+            exit 1
+          fi
+          echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks"
+
+      - name: Build release APK
+        env:
+          SIGNING_KEYSTORE: ${{ runner.temp }}/release.jks
+          SIGNING_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+        run: |
+          gradle assembleRelease --no-daemon
+          cp app/build/outputs/apk/release/app-release.apk "TaobaoTranslate-1.0.${{ github.run_number }}.apk"
 
       - uses: actions/upload-artifact@v4
         with:
           name: TaobaoTranslate-apk
-          path: app/build/outputs/apk/debug/app-debug.apk
+          path: TaobaoTranslate-*.apk
+
+      # Obtainium on the phone watches these releases and installs new versions.
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git log -1 --pretty=%B > notes.txt
+          gh release create "v1.0.${{ github.run_number }}" TaobaoTranslate-*.apk \
+            --title "1.0.${{ github.run_number }}" --notes-file notes.txt

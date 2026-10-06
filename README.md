@@ -28,11 +28,26 @@ Requires Android 11 or newer.
 
 1. Create a free account at github.com and a new repository (Add file > Upload files works fine, no command line needed).
 2. Unzip this project and upload **all** of its contents, including the hidden `.github` folder. If your computer hides it and it doesn't upload, in the repository choose **Add file > Create new file**, name it `.github/workflows/build.yml` and paste the contents of that file from this project.
-3. Open the **Actions** tab. The "Build APK" run starts by itself (or press **Run workflow**). It takes about 5-10 minutes.
-4. When it shows a green tick, open the run and download **TaobaoTranslate-apk** from the Artifacts section at the bottom. Unzip it to get `app-debug.apk`.
-5. Copy `app-debug.apk` to your phone, open it, and allow "Install unknown apps" when asked.
+3. Add the signing key secrets (see **Automatic updates** below). The build stops with an error until they exist.
+4. Open the **Actions** tab. The "Build APK" run starts by itself (or press **Run workflow**). It takes about 5-10 minutes.
+5. When it shows a green tick, the APK is attached to a new entry under **Releases** (and also under Artifacts at the bottom of the run).
 
 If the run fails, open it and copy the red error text; it usually points straight at the problem.
+
+## Automatic updates
+
+Every successful build publishes a GitHub **Release** with a higher version number, signed with the same key each time, so the phone can update in place.
+
+**One-time: signing key secrets.** In the repository on github.com: **Settings > Secrets and variables > Actions > New repository secret**. Add two secrets:
+
+| Name | Value |
+|---|---|
+| `KEYSTORE_BASE64` | the whole contents of `signing/KEYSTORE_BASE64.txt` |
+| `KEYSTORE_PASSWORD` | the contents of `signing/KEYSTORE_PASSWORD.txt` |
+
+The `signing/` folder is on your computer only (it is never committed). **Back it up.** If the key is lost, the next version can't update the installed app: you'd have to uninstall and set it up again.
+
+**On the phone: Obtainium.** Install [Obtainium](https://github.com/ImranR98/Obtainium) (download the APK from its Releases page). In Obtainium tap **Add app**, paste this repository's URL, and tap **Add**, then **Install**. Obtainium checks for new releases in the background and installs them. Apps installed through Obtainium also usually avoid Android's "Restricted setting" block on the accessibility switch.
 
 ## First run
 
