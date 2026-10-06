@@ -50,6 +50,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
 import kotlin.math.abs
+import kotlin.math.ceil
 import kotlin.math.min
 
 /**
@@ -84,6 +85,7 @@ class TranslateService : Service() {
         private const val SIG_H = 96
 
         private const val FLAT_RING_FRACTION = 0.7f // share of pixels around a block that must match its background
+        private const val MIN_TEXT_CONTRAST = 130   // brightness gap between text and background
 
         private val CJK = Regex("[\\u3400-\\u4dbf\\u4e00-\\u9fff]")
 
@@ -193,6 +195,9 @@ class TranslateService : Service() {
                 PixelFormat.TRANSLUCENT
             ).apply {
                 layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
+                // Don't let the status bar push the overlay down, or every translation
+                // lands below its Chinese.
+                fitInsetsTypes = 0
             }
             wm.addView(view, params)
 
@@ -275,16 +280,20 @@ class TranslateService : Service() {
                     val src = block.lines.joinToString("") { it.text }.trim()
                     if (src.isEmpty()) return@async null
                     val r = block.boundingBox!!
-                    val (bg, fg) = sampleColors(bmp, r) ?: return@async null
+                    val colors = sampleColors(bmp, r) ?: return@async null
                     val out = cache.get(src) ?: try {
                         tr.translate(src).await().also { cache.put(src, it) }
                     } catch (e: Exception) {
                         return@async null
                     }
-                    val rect = RectF(r.left * inv - 4f, r.top * inv - 2f, r.right * inv + 4f, r.bottom * inv + 2f)
+                    // Cover a little beyond the detected text so no stroke ends peek out;
+                    // the margin is invisible because it matches the page colour.
+                    val padX = OverlayView.PAD_X
+                    val padY = OverlayView.PAD_Y
+                    val rect = RectF(r.left * inv - padX, r.top * inv - padY, r.right * inv + padX, r.bottom * inv + padY)
                     val lineHeights = block.lines.mapNotNull { it.boundingBox?.height() }.sorted()
                     val lineHeight = (lineHeights.getOrNull(lineHeights.size / 2) ?: r.height()) * inv
-                    OverlayView.Box(rect, out, bg, fg, lineHeight)
+                    OverlayView.Box(rect, out, colors.bgStart, colors.bgEnd, colors.fg, lineHeight)
                 }
             }
             .awaitAll()
@@ -329,32 +338,51 @@ class TranslateService : Service() {
         return changed > a.size * 0.02
     }
 
+    /** Page colour behind a text block (left to right, for gradient buttons) and its text colour. */
+    private class Colors(val bgStart: Int, val bgEnd: Int, val fg: Int)
+
     /**
-     * Returns (background, text) colours for a text block, so the overlay blends
-     * into the page: red prices stay red, grey captions stay grey. Returns null
-     * when the block sits on an image rather than a flat background.
+     * Picks colours for a text block so the overlay blends into the page: red
+     * prices stay red, grey captions stay grey, gradient buttons stay gradients.
+     * Returns null when the block sits on an image rather than a flat background.
      */
-    private fun sampleColors(bmp: Bitmap, r: Rect): Pair<Int, Int>? {
+    private fun sampleColors(bmp: Bitmap, r: Rect): Colors? {
         val left = r.left.coerceIn(0, bmp.width - 1)
         val top = r.top.coerceIn(0, bmp.height - 1)
         val right = r.right.coerceIn(left + 1, bmp.width)
         val bottom = r.bottom.coerceIn(top + 1, bmp.height)
 
-        // Background: most common colour on a ring just outside the block.
-        val outL = (left - 3).coerceAtLeast(0)
-        val outT = (top - 3).coerceAtLeast(0)
-        val outR = (right + 2).coerceAtMost(bmp.width - 1)
-        val outB = (bottom + 2).coerceAtMost(bmp.height - 1)
-        val ring = IntArray(2 * ((outR - outL) / 4 + 1) + 2 * ((outB - outT) / 4 + 1))
+        // Background: sample a ring just outside the area the overlay will cover,
+        // keeping left and right halves apart so a gradient can be matched.
+        val gapX = ceil((OverlayView.PAD_X + 2) * captureScale).toInt()
+        val gapY = ceil((OverlayView.PAD_Y + 2) * captureScale).toInt()
+        val outL = (left - gapX).coerceAtLeast(0)
+        val outT = (top - gapY).coerceAtLeast(0)
+        val outR = (right + gapX).coerceAtMost(bmp.width - 1)
+        val outB = (bottom + gapY).coerceAtMost(bmp.height - 1)
+        val midX = (outL + outR) / 2
+        val size = 2 * ((outR - outL) / 4 + 1) + 2 * ((outB - outT) / 4 + 1)
+        val ring = IntArray(size)
+        val leftRing = IntArray(size)
+        val rightRing = IntArray(size)
         var n = 0
-        for (x in outL..outR step 4) { ring[n++] = bmp.getPixel(x, outT); ring[n++] = bmp.getPixel(x, outB) }
-        for (y in outT..outB step 4) { ring[n++] = bmp.getPixel(outL, y); ring[n++] = bmp.getPixel(outR, y) }
+        var nl = 0
+        var nr = 0
+        fun add(x: Int, y: Int) {
+            val c = bmp.getPixel(x, y)
+            ring[n++] = c
+            if (x < midX) leftRing[nl++] = c else rightRing[nr++] = c
+        }
+        for (x in outL..outR step 4) { add(x, outT); add(x, outB) }
+        for (y in outT..outB step 4) { add(outL, y); add(outR, y) }
         val bg = dominant(ring, n) ?: Color.WHITE
+        val bgL = dominant(leftRing, nl) ?: bg
+        val bgR = dominant(rightRing, nr) ?: bg
 
         // Text printed on a photo or banner has a busy surround. Leave it alone:
         // a solid box over a picture looks worse than the untranslated slogan.
         var flat = 0
-        for (i in 0 until n) if (colorDistance(ring[i], bg) <= 60) flat++
+        for (i in 0 until n) if (min(colorDistance(ring[i], bgL), colorDistance(ring[i], bgR)) <= 60) flat++
         if (flat < n * FLAT_RING_FRACTION) return null
 
         // Text: most common colour inside the block that clearly differs from the background.
@@ -363,12 +391,29 @@ class TranslateService : Service() {
         val px = IntArray(w * h)
         bmp.getPixels(px, 0, w, left, top, w, h)
         var inkCount = 0
-        for (c in px) if (colorDistance(c, bg) > 120) px[inkCount++] = c
+        for (c in px) if (min(colorDistance(c, bgL), colorDistance(c, bgR)) > 120) px[inkCount++] = c
         val ink = dominant(px, inkCount)
-        val fg = if (ink != null && abs(luma(ink) - luma(bg)) >= 100) ink
-        else if (luma(bg) > 140) Color.BLACK else Color.WHITE
-        return bg to fg
+        val fg = if (ink != null) strengthen(ink, bg) else if (luma(bg) > 140) Color.BLACK else Color.WHITE
+
+        return if (colorDistance(bgL, bgR) > 12) Colors(bgL, bgR, fg) else Colors(bg, bg, fg)
     }
+
+    /** Darkens (or lightens) a pale text colour until it reads as solid ink, keeping its hue. */
+    private fun strengthen(c: Int, bg: Int): Int {
+        val target = if (luma(c) < luma(bg)) Color.BLACK else Color.WHITE
+        var out = c
+        repeat(8) {
+            if (abs(luma(out) - luma(bg)) >= MIN_TEXT_CONTRAST) return out
+            out = mix(out, target, 0.25f)
+        }
+        return out
+    }
+
+    private fun mix(a: Int, b: Int, t: Float): Int = Color.rgb(
+        (Color.red(a) + (Color.red(b) - Color.red(a)) * t).toInt(),
+        (Color.green(a) + (Color.green(b) - Color.green(a)) * t).toInt(),
+        (Color.blue(a) + (Color.blue(b) - Color.blue(a)) * t).toInt()
+    )
 
     /** Most common colour among the first [n] entries (bucketed, then averaged). */
     private fun dominant(colors: IntArray, n: Int): Int? {
