@@ -11,6 +11,7 @@ import android.content.pm.ServiceInfo
 import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.PixelFormat
+import android.graphics.Rect
 import android.graphics.RectF
 import android.graphics.drawable.Icon
 import android.hardware.display.DisplayManager
@@ -81,6 +82,8 @@ class TranslateService : Service() {
 
         private const val SIG_W = 48              // change-detection fingerprint size
         private const val SIG_H = 96
+
+        private const val FLAT_RING_FRACTION = 0.7f // share of pixels around a block that must match its background
 
         private val CJK = Regex("[\\u3400-\\u4dbf\\u4e00-\\u9fff]")
 
@@ -271,16 +274,17 @@ class TranslateService : Service() {
                     // Chinese has no spaces between words, so join wrapped lines directly.
                     val src = block.lines.joinToString("") { it.text }.trim()
                     if (src.isEmpty()) return@async null
+                    val r = block.boundingBox!!
+                    val (bg, fg) = sampleColors(bmp, r) ?: return@async null
                     val out = cache.get(src) ?: try {
                         tr.translate(src).await().also { cache.put(src, it) }
                     } catch (e: Exception) {
                         return@async null
                     }
-                    val r = block.boundingBox!!
                     val rect = RectF(r.left * inv - 4f, r.top * inv - 2f, r.right * inv + 4f, r.bottom * inv + 2f)
-                    val bg = sampleBackground(bmp, r.left, r.top)
-                    val fg = if (luma(bg) > 140) Color.BLACK else Color.WHITE
-                    OverlayView.Box(rect, out, bg, fg)
+                    val lineHeights = block.lines.mapNotNull { it.boundingBox?.height() }.sorted()
+                    val lineHeight = (lineHeights.getOrNull(lineHeights.size / 2) ?: r.height()) * inv
+                    OverlayView.Box(rect, out, bg, fg, lineHeight)
                 }
             }
             .awaitAll()
@@ -325,12 +329,70 @@ class TranslateService : Service() {
         return changed > a.size * 0.02
     }
 
-    private fun sampleBackground(bmp: Bitmap, left: Int, top: Int): Int {
-        val x = (left - 2).coerceIn(0, bmp.width - 1)
-        val y = (top - 2).coerceIn(0, bmp.height - 1)
-        val p = bmp.getPixel(x, y)
-        return Color.rgb(Color.red(p), Color.green(p), Color.blue(p))
+    /**
+     * Returns (background, text) colours for a text block, so the overlay blends
+     * into the page: red prices stay red, grey captions stay grey. Returns null
+     * when the block sits on an image rather than a flat background.
+     */
+    private fun sampleColors(bmp: Bitmap, r: Rect): Pair<Int, Int>? {
+        val left = r.left.coerceIn(0, bmp.width - 1)
+        val top = r.top.coerceIn(0, bmp.height - 1)
+        val right = r.right.coerceIn(left + 1, bmp.width)
+        val bottom = r.bottom.coerceIn(top + 1, bmp.height)
+
+        // Background: most common colour on a ring just outside the block.
+        val outL = (left - 3).coerceAtLeast(0)
+        val outT = (top - 3).coerceAtLeast(0)
+        val outR = (right + 2).coerceAtMost(bmp.width - 1)
+        val outB = (bottom + 2).coerceAtMost(bmp.height - 1)
+        val ring = IntArray(2 * ((outR - outL) / 4 + 1) + 2 * ((outB - outT) / 4 + 1))
+        var n = 0
+        for (x in outL..outR step 4) { ring[n++] = bmp.getPixel(x, outT); ring[n++] = bmp.getPixel(x, outB) }
+        for (y in outT..outB step 4) { ring[n++] = bmp.getPixel(outL, y); ring[n++] = bmp.getPixel(outR, y) }
+        val bg = dominant(ring, n) ?: Color.WHITE
+
+        // Text printed on a photo or banner has a busy surround. Leave it alone:
+        // a solid box over a picture looks worse than the untranslated slogan.
+        var flat = 0
+        for (i in 0 until n) if (colorDistance(ring[i], bg) <= 60) flat++
+        if (flat < n * FLAT_RING_FRACTION) return null
+
+        // Text: most common colour inside the block that clearly differs from the background.
+        val w = right - left
+        val h = bottom - top
+        val px = IntArray(w * h)
+        bmp.getPixels(px, 0, w, left, top, w, h)
+        var inkCount = 0
+        for (c in px) if (colorDistance(c, bg) > 120) px[inkCount++] = c
+        val ink = dominant(px, inkCount)
+        val fg = if (ink != null && abs(luma(ink) - luma(bg)) >= 100) ink
+        else if (luma(bg) > 140) Color.BLACK else Color.WHITE
+        return bg to fg
     }
+
+    /** Most common colour among the first [n] entries (bucketed, then averaged). */
+    private fun dominant(colors: IntArray, n: Int): Int? {
+        if (n == 0) return null
+        val counts = IntArray(4096)
+        val rs = IntArray(4096)
+        val gs = IntArray(4096)
+        val bs = IntArray(4096)
+        for (i in 0 until n) {
+            val c = colors[i]
+            val r = Color.red(c)
+            val g = Color.green(c)
+            val b = Color.blue(c)
+            val k = ((r shr 4) shl 8) or ((g shr 4) shl 4) or (b shr 4)
+            counts[k]++; rs[k] += r; gs[k] += g; bs[k] += b
+        }
+        var best = 0
+        for (k in counts.indices) if (counts[k] > counts[best]) best = k
+        val c = counts[best]
+        return Color.rgb(rs[best] / c, gs[best] / c, bs[best] / c)
+    }
+
+    private fun colorDistance(a: Int, b: Int): Int =
+        abs(Color.red(a) - Color.red(b)) + abs(Color.green(a) - Color.green(b)) + abs(Color.blue(a) - Color.blue(b))
 
     private fun luma(c: Int): Int = (Color.red(c) * 299 + Color.green(c) * 587 + Color.blue(c) * 114) / 1000
 
