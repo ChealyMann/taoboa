@@ -34,7 +34,12 @@ jobs:
             echo "::error::Missing the KEYSTORE_BASE64 and KEYSTORE_PASSWORD repository secrets. See README, 'Automatic updates'."
             exit 1
           fi
-          echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks"
+          # Tolerate spaces and line breaks picked up when pasting the secret.
+          clean=$(printf '%s' "$KEYSTORE_BASE64" | tr -d ' \r\n\t')
+          if ! printf '%s' "$clean" | base64 -d > "$RUNNER_TEMP/release.jks" 2>/dev/null; then
+            echo "::error::KEYSTORE_BASE64 is not valid: got ${#clean} characters, expected 5712. Paste the whole of signing/KEYSTORE_BASE64.txt again."
+            exit 1
+          fi
 
       - name: Build release APK
         env:
