@@ -60,6 +60,8 @@ Tap **Start translating Taobao**. You will be asked, in order, to:
 
 After that it stays on: translations appear whenever Taobao is open. Use the notification's **Pause** and **Turn off** buttons, or the **Turn off** button in the app. Changing the language in the app and tapping Start switches it immediately.
 
+**Something not translated?** Open that Taobao screen, switch to this app and tap **Copy diagnostic report**. It copies what the service saw (windows, text found, screenshot status) so it can be pasted into a bug report.
+
 ## Known limits
 
 - **Text inside product photos and banners** stays in Chinese on purpose: a flat box over a picture looks worse than the original.

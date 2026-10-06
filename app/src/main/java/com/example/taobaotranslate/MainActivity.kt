@@ -1,6 +1,8 @@
 package com.example.taobaotranslate
 
 import android.Manifest
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.ComponentName
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -74,6 +76,21 @@ class MainActivity : AppCompatActivity() {
         findViewById<Button>(R.id.stopButton).setOnClickListener {
             sendBroadcast(Intent(TranslateAccessibilityService.ACTION_TURN_OFF).setPackage(packageName))
             setStatus("Turned off. Tap Start to turn it back on.")
+        }
+
+        // What the service last saw in Taobao, to paste when something isn't translated.
+        findViewById<Button>(R.id.reportButton).setOnClickListener {
+            val report = TranslateAccessibilityService.lastReport
+            if (report == null) {
+                Toast.makeText(
+                    this, "No report yet. Turn translation on, open the Taobao screen, then come back.",
+                    Toast.LENGTH_LONG
+                ).show()
+            } else {
+                getSystemService(ClipboardManager::class.java)
+                    .setPrimaryClip(ClipData.newPlainText("Taobao Live Translate report", report))
+                Toast.makeText(this, "Report copied. Paste it in your message.", Toast.LENGTH_LONG).show()
+            }
         }
     }
 

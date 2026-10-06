@@ -57,6 +57,14 @@
             android:layout_marginTop="8dp"
             android:text="Turn off" />
 
+        <Button
+            android:id="@+id/reportButton"
+            style="?attr/materialButtonOutlinedStyle"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="Copy diagnostic report" />
+
         <TextView
             android:id="@+id/statusText"
             android:layout_width="match_parent"

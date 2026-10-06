@@ -37,6 +37,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
@@ -78,13 +79,29 @@ class TranslateAccessibilityService : AccessibilityService() {
 
         @Volatile
         var running = false
+
+        /** What the service last saw in Taobao, for the app's "Copy diagnostic report" button. */
+        @Volatile
+        var lastReport: String? = null
     }
 
-    /** One piece of Chinese text on screen. [clip] is the scrolling list it belongs to. */
-    private class Item(val text: String, val bounds: Rect, val clip: Rect)
+    /**
+     * One piece of Chinese text on screen. [clip] is the scrolling list it belongs to.
+     * [container] marks a description on an element that has children.
+     */
+    private class Item(val text: String, val bounds: Rect, val clip: Rect, val container: Boolean)
 
-    /** What Taobao is showing. [window] is null when Taobao isn't in front. */
-    private class Snapshot(val window: Rect?, val windowId: Int, val items: List<Item>, val occluders: List<Rect>)
+    /**
+     * What Taobao is showing. [window] is null when Taobao isn't in front.
+     * [report] describes the windows and text found, when Taobao is on screen.
+     */
+    private class Snapshot(
+        val window: Rect?,
+        val windowId: Int,
+        val items: List<Item>,
+        val occluders: List<Rect>,
+        val report: String? = null,
+    )
 
     /** A screenshot; [left]/[top] is where its (0, 0) is on screen. */
     private class Capture(val bitmap: Bitmap?, val left: Int, val top: Int, val secure: Boolean)
@@ -119,6 +136,8 @@ class TranslateAccessibilityService : AccessibilityService() {
     private var lastScrollAt = 0L
     private var fastScrollArea: Rect? = null
     private var fastScrollUntil = 0L
+    private val windowShotFailures = HashSet<Int>()
+    @Volatile private var lastShotInfo = "no screenshot yet"
 
     private val refreshRunnable = Runnable { refresh() }
 
@@ -269,64 +288,118 @@ class TranslateAccessibilityService : AccessibilityService() {
     private fun readScreen(): Snapshot {
         val metrics = resources.displayMetrics
         val screenArea = metrics.widthPixels.toLong() * metrics.heightPixels
+        val windowList = StringBuilder()
         val occluders = ArrayList<Rect>()
+        var bigSystemWindow = false
+        var frontPackage: String? = null
         var target: AccessibilityWindowInfo? = null
         var root: AccessibilityNodeInfo? = null
+        var taobaoSeen = false
+        var decided = false
         for (w in windows.sortedByDescending { it.layer }) {
-            if (w.type == AccessibilityWindowInfo.TYPE_ACCESSIBILITY_OVERLAY) continue
             val bounds = Rect().also { w.getBoundsInScreen(it) }
-            if (w.type == AccessibilityWindowInfo.TYPE_APPLICATION) {
-                val r = w.root
-                if (r?.packageName?.toString() == TAOBAO_PACKAGE) {
+            val r = if (w.type == AccessibilityWindowInfo.TYPE_APPLICATION) w.root else null
+            val pkg = r?.packageName?.toString()
+            if (pkg == TAOBAO_PACKAGE) taobaoSeen = true
+            windowList.append("  L${w.layer} ${windowType(w.type)} ${bounds.toShortString()} pkg=$pkg title=${w.title}\n")
+            if (decided || w.type == AccessibilityWindowInfo.TYPE_ACCESSIBILITY_OVERLAY) continue
+            if (w.type == AccessibilityWindowInfo.TYPE_APPLICATION && r != null) {
+                if (pkg == TAOBAO_PACKAGE) {
                     target = w
                     root = r
-                    break
+                    decided = true
+                    continue
                 }
-                if (area(bounds) > screenArea / 2) break // another app is in front
+                if (area(bounds) > screenArea / 2) {
+                    frontPackage = pkg // another app is in front
+                    decided = true
+                    continue
+                }
             }
+            if (w.type == AccessibilityWindowInfo.TYPE_SYSTEM && area(bounds) > screenArea / 2) bigSystemWindow = true
             occluders += bounds
         }
-        val taobao = target ?: return emptySnapshot
-        val taobaoRoot = root ?: return emptySnapshot
+        val windowsText = "Windows, top first:\n$windowList"
+        val taobao = target
+        val taobaoRoot = root
+        if (taobao == null || taobaoRoot == null) {
+            // Switching to this app to copy the report shouldn't replace the report.
+            return if (taobaoSeen && frontPackage != packageName) {
+                Snapshot(null, -1, emptyList(), emptyList(), "$windowsText\nTaobao is not the front window.\n")
+            } else {
+                emptySnapshot
+            }
+        }
 
         val window = Rect()
         taobao.getBoundsInScreen(window)
         // The notification shade or a large system dialog is covering Taobao.
-        if (occluders.any { area(it) > area(window) / 2 }) return emptySnapshot
+        if (occluders.any { area(it) > area(window) / 2 }) {
+            return if (bigSystemWindow) emptySnapshot
+            else Snapshot(null, -1, emptyList(), emptyList(), "$windowsText\nSomething covers more than half of Taobao.\n")
+        }
 
         val items = ArrayList<Item>()
-        collect(taobaoRoot, window, items, 0)
-        return Snapshot(window, taobao.id, dedupe(items), occluders)
+        val stats = TreeStats()
+        collect(taobaoRoot, window, items, 0, stats)
+        val unique = dedupe(items)
+        val report = "$windowsText\nUsing window ${taobao.id} ${window.toShortString()}\n" +
+            "Nodes: ${stats.nodes}, hidden: ${stats.hidden}, with text: ${stats.withText}, " +
+            "WebViews: ${stats.webViews}, Chinese items: ${items.size} (${unique.size} after merging)\n" +
+            "Text seen:\n${stats.samples.joinToString("\n")}\n"
+        return Snapshot(window, taobao.id, unique, occluders, report)
     }
 
-    private fun collect(node: AccessibilityNodeInfo, clip: Rect, out: MutableList<Item>, depth: Int) {
-        if (depth > 80 || !node.isVisibleToUser) return
+    /** Counts for the diagnostic report. */
+    private class TreeStats {
+        var nodes = 0
+        var hidden = 0
+        var withText = 0
+        var webViews = 0
+        val samples = ArrayList<String>()
+    }
+
+    private fun collect(node: AccessibilityNodeInfo, clip: Rect, out: MutableList<Item>, depth: Int, stats: TreeStats) {
+        stats.nodes++
+        if (node.className?.contains("WebView") == true) stats.webViews++
+        if (depth > 80 || !node.isVisibleToUser) {
+            stats.hidden++
+            return
+        }
         val bounds = Rect()
         node.getBoundsInScreen(bounds)
         if (!bounds.intersect(clip)) return
 
+        // Some elements carry their text as a description; on a container it only
+        // counts when nothing inside has text of its own (see dedupe).
         val text = when {
             node.isEditable -> null // the search box: leave what the user types alone
             !node.text.isNullOrBlank() -> node.text
-            node.childCount == 0 -> node.contentDescription
+            !node.contentDescription.isNullOrBlank() -> node.contentDescription
             else -> null
         }?.toString()?.trim()
+        if (!text.isNullOrEmpty()) {
+            stats.withText++
+            if (stats.samples.size < 25) {
+                stats.samples += "  ${node.className?.substringAfterLast('.')} ${bounds.toShortString()}: ${text.take(20).replace('\n', ' ')}"
+            }
+        }
         if (text != null && CJK.containsMatchIn(text) && bounds.width() >= 4 && bounds.height() >= 4) {
-            out += Item(text, bounds, clip)
+            out += Item(text, bounds, clip, container = node.text.isNullOrBlank() && node.childCount > 0)
         }
 
         val childClip = if (node.isScrollable) bounds else clip
         for (i in 0 until node.childCount) {
             val child = node.getChild(i) ?: continue
-            collect(child, childClip, out, depth + 1)
+            collect(child, childClip, out, depth + 1, stats)
         }
     }
 
-    /** Drops containers that repeat text their children already show. */
+    /** Drops containers whose text is already shown by elements inside them. */
     private fun dedupe(items: List<Item>): List<Item> {
         val unique = items.distinctBy { it.text + "|" + it.bounds.flattenToString() }
         return unique.filter { a ->
-            unique.none { b -> b !== a && a.bounds.contains(b.bounds) && a.text.contains(b.text) }
+            unique.none { b -> b !== a && a.bounds.contains(b.bounds) && (a.container || a.text.contains(b.text)) }
         }
     }
 
@@ -334,6 +407,7 @@ class TranslateAccessibilityService : AccessibilityService() {
         val ov = overlay ?: return
         if (s.window == null) {
             ov.setBoxes(emptyList())
+            if (s.report != null) lastReport = buildReport(s)
             return
         }
         val now = SystemClock.uptimeMillis()
@@ -355,6 +429,7 @@ class TranslateAccessibilityService : AccessibilityService() {
             boxes += boxFor(item, style, out)
         }
         ov.setBoxes(boxes, s.occluders)
+        if (s.report != null) lastReport = buildReport(s)
 
         if (hideArea != null) handler.postDelayed({ requestRefresh() }, fastScrollUntil - now)
         if (unmeasured.isNotEmpty()) measure(s, unmeasured, scrollsAtStart)
@@ -375,6 +450,32 @@ class TranslateAccessibilityService : AccessibilityService() {
             rect, text, st.fg, st.lineHeight, st.bg, st.bgEnd, x + st.bgStartX, x + st.bgEndX,
             maxRight = b.right.toFloat(), maxBottom = b.bottom.toFloat(), clip = item.clip,
         )
+    }
+
+    private fun buildReport(s: Snapshot): String {
+        val itemLines = s.items.take(40).joinToString("\n") { item ->
+            val style = styles.get(styleKey(item))
+            val state = when {
+                style == null -> "not measured"
+                style === ColorSampler.ON_IMAGE -> "skipped"
+                else -> "measured"
+            }
+            val translated = if (translations.get(item.text) != null) "translated" else "not translated"
+            "  ${item.bounds.toShortString()} $state, $translated: ${item.text.take(20).replace('\n', ' ')}"
+        }
+        val version = runCatching { packageManager.getPackageInfo(packageName, 0).versionName }.getOrNull()
+        return "Taobao Live Translate $version, Android ${Build.VERSION.RELEASE} (SDK ${Build.VERSION.SDK_INT})\n" +
+            "Last screenshot: $lastShotInfo\n\n${s.report}\nChinese items:\n$itemLines\n"
+    }
+
+    private fun windowType(type: Int) = when (type) {
+        AccessibilityWindowInfo.TYPE_APPLICATION -> "app"
+        AccessibilityWindowInfo.TYPE_INPUT_METHOD -> "keyboard"
+        AccessibilityWindowInfo.TYPE_SYSTEM -> "system"
+        AccessibilityWindowInfo.TYPE_ACCESSIBILITY_OVERLAY -> "a11y-overlay"
+        AccessibilityWindowInfo.TYPE_SPLIT_SCREEN_DIVIDER -> "divider"
+        AccessibilityWindowInfo.TYPE_MAGNIFICATION_OVERLAY -> "magnifier"
+        else -> "type$type"
     }
 
     private fun styleKey(item: Item) = "${item.text}|${item.bounds.width()}x${item.bounds.height()}"
@@ -438,11 +539,24 @@ class TranslateAccessibilityService : AccessibilityService() {
 
     /**
      * Screenshot of Taobao's window (Android 14+, which leaves our overlay out) or
-     * of the whole screen (Android 11 to 13).
+     * of the whole screen (Android 11 to 13, or when the window can't be captured).
      */
-    private suspend fun capture(s: Snapshot): Capture = suspendCancellableCoroutine { cont ->
+    private suspend fun capture(s: Snapshot): Capture {
+        if (Build.VERSION.SDK_INT >= 34 && s.windowId !in windowShotFailures) {
+            val c = shoot(s, perWindow = true)
+            if (c.bitmap != null || c.secure) return c
+            // Some pop-up windows can't be captured on their own: use the whole screen
+            // for this window from now on. That screenshot has its own rate limit.
+            if (windowShotFailures.size > 50) windowShotFailures.clear()
+            windowShotFailures += s.windowId
+            delay(SCREENSHOT_INTERVAL_MS)
+        }
+        return shoot(s, perWindow = false)
+    }
+
+    private suspend fun shoot(s: Snapshot, perWindow: Boolean): Capture = suspendCancellableCoroutine { cont ->
         val window = s.window ?: Rect()
-        val perWindow = Build.VERSION.SDK_INT >= 34
+        val what = if (perWindow) "window ${s.windowId}" else "whole screen"
         val ox = if (perWindow) window.left else 0
         val oy = if (perWindow) window.top else 0
         val callback = object : TakeScreenshotCallback {
@@ -457,18 +571,21 @@ class TranslateAccessibilityService : AccessibilityService() {
                 } finally {
                     buffer.close()
                 }
+                lastShotInfo = "$what " + if (bmp != null) "OK" else "unreadable"
                 cont.resume(Capture(bmp, ox, oy, false))
             }
 
             override fun onFailure(errorCode: Int) {
+                lastShotInfo = "$what failed, error $errorCode"
                 cont.resume(Capture(null, 0, 0, errorCode == ERROR_TAKE_SCREENSHOT_SECURE_WINDOW))
             }
         }
         try {
-            if (Build.VERSION.SDK_INT >= 34) takeScreenshotOfWindow(s.windowId, workerExecutor, callback)
+            if (perWindow && Build.VERSION.SDK_INT >= 34) takeScreenshotOfWindow(s.windowId, workerExecutor, callback)
             else takeScreenshot(Display.DEFAULT_DISPLAY, workerExecutor, callback)
         } catch (e: Exception) {
             Log.w(TAG, "Screenshot failed", e)
+            lastShotInfo = "$what threw ${e.javaClass.simpleName}: ${e.message}"
             cont.resume(Capture(null, 0, 0, false))
         }
     }
