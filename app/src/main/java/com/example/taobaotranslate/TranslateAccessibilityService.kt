@@ -381,7 +381,7 @@ class TranslateAccessibilityService : AccessibilityService() {
         if (!text.isNullOrEmpty()) {
             stats.withText++
             if (stats.samples.size < 25) {
-                stats.samples += "  ${node.className?.substringAfterLast('.')} ${bounds.toShortString()}: ${text.take(20).replace('\n', ' ')}"
+                stats.samples += "  ${node.className?.toString()?.substringAfterLast('.')} ${bounds.toShortString()}: ${text.take(20).replace('\n', ' ')}"
             }
         }
         if (text != null && CJK.containsMatchIn(text) && bounds.width() >= 4 && bounds.height() >= 4) {
