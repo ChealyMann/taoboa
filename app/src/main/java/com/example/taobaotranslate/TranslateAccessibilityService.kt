@@ -32,10 +32,6 @@ import com.google.mlkit.nl.translate.TranslateLanguage
 import com.google.mlkit.nl.translate.Translation
 import com.google.mlkit.nl.translate.Translator
 import com.google.mlkit.nl.translate.TranslatorOptions
-import com.google.mlkit.vision.common.InputImage
-import com.google.mlkit.vision.text.TextRecognition
-import com.google.mlkit.vision.text.TextRecognizer
-import com.google.mlkit.vision.text.chinese.ChineseTextRecognizerOptions
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -43,12 +39,10 @@ import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
-import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
 import java.util.concurrent.Executors
 import kotlin.coroutines.resume
 import kotlin.math.abs
-import kotlin.math.ceil
 import kotlin.math.max
 
 /**
@@ -58,9 +52,6 @@ import kotlin.math.max
  *  2. translates it on-device,
  *  3. measures each new text element's colours once from a screenshot,
  *  4. draws the translations over the Chinese, moving them as the page scrolls.
- *
- * On Android 14+ it also runs OCR on a screenshot of Taobao's window once the
- * screen settles, to catch text that isn't in the accessibility tree.
  */
 class TranslateAccessibilityService : AccessibilityService() {
 
@@ -78,8 +69,6 @@ class TranslateAccessibilityService : AccessibilityService() {
         private const val REFRESH_THROTTLE_MS = 200L    // most often we re-read the screen while it changes
         private const val SCREENSHOT_INTERVAL_MS = 350L // Android allows about 3 screenshots a second
         private const val SCROLL_QUIET_MS = 150L        // no colour measuring while the page is moving
-        private const val SETTLE_MS = 700L              // quiet time before the OCR backup pass
-        private const val OCR_MIN_INTERVAL_MS = 2500L
         private const val FAST_SCROLL_PX = 150          // per scroll event; faster than this, hide instead of follow
         private const val FAST_SCROLL_HIDE_MS = 250L
         private const val MAX_MEASURE_TRIES = 3
@@ -104,7 +93,7 @@ class TranslateAccessibilityService : AccessibilityService() {
 
     private val handler = Handler(Looper.getMainLooper())
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
-    // Reading the tree, measuring colours and OCR happen off the main thread, one at a time.
+    // Reading the tree and measuring colours happen off the main thread, one at a time.
     private val workerExecutor = Executors.newSingleThreadExecutor { Thread(it, "translate-worker").apply { isDaemon = true } }
     private val worker = workerExecutor.asCoroutineDispatcher()
 
@@ -112,7 +101,6 @@ class TranslateAccessibilityService : AccessibilityService() {
     private var overlay: OverlayView? = null
     private var prefs: SharedPreferences? = null
     private var translator: Translator? = null
-    private var recognizer: TextRecognizer? = null
 
     private val translations = LruCache<String, String>(1000)
     private val pendingTranslations = HashSet<String>()
@@ -120,8 +108,6 @@ class TranslateAccessibilityService : AccessibilityService() {
     private val measureFailures = HashMap<String, Int>()
 
     private var paused = false
-    private var lastSnapshot: Snapshot? = null
-    private var ocrBoxes: List<OverlayView.Box> = emptyList()
 
     private var refreshScheduled = false
     private var refreshing = false
@@ -133,12 +119,8 @@ class TranslateAccessibilityService : AccessibilityService() {
     private var lastScrollAt = 0L
     private var fastScrollArea: Rect? = null
     private var fastScrollUntil = 0L
-    private var changeCount = 0
-    private var ocrChangeCount = -1
-    private var lastOcrAt = 0L
 
     private val refreshRunnable = Runnable { refresh() }
-    private val settleRunnable = Runnable { ocrPass() }
 
     private val prefListener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
         if (key == PREF_LANG) setUpTranslator()
@@ -161,9 +143,6 @@ class TranslateAccessibilityService : AccessibilityService() {
         prefs = p
         p.registerOnSharedPreferenceChangeListener(prefListener)
         setUpTranslator()
-        if (Build.VERSION.SDK_INT >= 34) {
-            recognizer = TextRecognition.getClient(ChineseTextRecognizerOptions.Builder().build())
-        }
 
         val wm = getSystemService(WindowManager::class.java)
         windowManager = wm
@@ -199,7 +178,6 @@ class TranslateAccessibilityService : AccessibilityService() {
         translator?.close()
         translations.evictAll()
         pendingTranslations.clear()
-        ocrBoxes = emptyList()
         val tr = Translation.getClient(
             TranslatorOptions.Builder()
                 .setSourceLanguage(TranslateLanguage.CHINESE)
@@ -221,15 +199,10 @@ class TranslateAccessibilityService : AccessibilityService() {
         val fromTaobao = event.packageName?.toString() == TAOBAO_PACKAGE
         when (event.eventType) {
             AccessibilityEvent.TYPE_VIEW_SCROLLED -> if (fromTaobao) onScrolled(event) else return
-            // A new page or pop-up: OCR results from the old one no longer apply.
-            AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED -> if (fromTaobao) ocrBoxes = emptyList()
-            // Keyboard, notification shade, app switch...
-            AccessibilityEvent.TYPE_WINDOWS_CHANGED -> Unit
+            // App switches, pop-ups, keyboard, notification shade...
+            AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED, AccessibilityEvent.TYPE_WINDOWS_CHANGED -> Unit
             else -> if (!fromTaobao) return
         }
-        changeCount++
-        handler.removeCallbacks(settleRunnable)
-        handler.postDelayed(settleRunnable, SETTLE_MS)
         requestRefresh()
     }
 
@@ -251,13 +224,8 @@ class TranslateAccessibilityService : AccessibilityService() {
             fastScrollArea = area
             fastScrollUntil = lastScrollAt + FAST_SCROLL_HIDE_MS
             ov.hide(area)
-            ocrBoxes = ocrBoxes.filterNot { area.contains(it.rect.centerX().toInt(), it.rect.centerY().toInt()) }
         } else {
             ov.shift(area, -dx.toFloat(), -dy.toFloat())
-            ocrBoxes = ocrBoxes.map {
-                if (area.contains(it.rect.centerX().toInt(), it.rect.centerY().toInt())) it.offset(-dx.toFloat(), -dy.toFloat())
-                else it
-            }
         }
     }
 
@@ -363,7 +331,6 @@ class TranslateAccessibilityService : AccessibilityService() {
     }
 
     private fun show(s: Snapshot, scrollsAtStart: Int) {
-        lastSnapshot = s
         val ov = overlay ?: return
         if (s.window == null) {
             ov.setBoxes(emptyList())
@@ -386,10 +353,6 @@ class TranslateAccessibilityService : AccessibilityService() {
             if (out == null) continue
             if (hideArea != null && hideArea.contains(item.bounds.centerX(), item.bounds.centerY())) continue
             boxes += boxFor(item, style, out)
-        }
-        // OCR results only fill gaps the tree doesn't cover.
-        for (b in ocrBoxes) {
-            if (s.items.none { RectF.intersects(b.rect, RectF(it.bounds)) }) boxes += b
         }
         ov.setBoxes(boxes, s.occluders)
 
@@ -510,93 +473,12 @@ class TranslateAccessibilityService : AccessibilityService() {
         }
     }
 
-    // ------------------------------------------------------------- OCR backup
-
-    /**
-     * Once the screen settles, OCR a screenshot of Taobao's window to find Chinese
-     * text the accessibility tree doesn't list. Android 14+ only: older versions
-     * can't leave our own overlay out of the screenshot.
-     */
-    private fun ocrPass() {
-        if (Build.VERSION.SDK_INT < 34 || paused) return
-        val s = lastSnapshot ?: return
-        if (s.window == null || changeCount == ocrChangeCount) return
-        val now = SystemClock.uptimeMillis()
-        val wait = maxOf(lastShotAt + SCREENSHOT_INTERVAL_MS, lastOcrAt + OCR_MIN_INTERVAL_MS) - now
-        if (shotInFlight || wait > 0) {
-            handler.removeCallbacks(settleRunnable)
-            handler.postDelayed(settleRunnable, max(wait, 100L))
-            return
-        }
-        shotInFlight = true
-        lastShotAt = now
-        lastOcrAt = now
-        ocrChangeCount = changeCount
-        val scrollsAtStart = scrollCount
-        scope.launch {
-            val cap = capture(s)
-            shotInFlight = false
-            val bmp = cap.bitmap ?: return@launch
-            val found = try {
-                withContext(worker) { readImageText(bmp, cap, s) }
-            } catch (e: Exception) {
-                Log.w(TAG, "OCR failed", e)
-                null
-            } finally {
-                bmp.recycle()
-            }
-            // If the page moved meanwhile, the next settle redoes it.
-            if (found == null || paused || scrollCount != scrollsAtStart) return@launch
-            ocrBoxes = found
-            requestRefresh()
-        }
-    }
-
-    private suspend fun readImageText(bmp: Bitmap, cap: Capture, s: Snapshot): List<OverlayView.Box> {
-        val tr = translator ?: return emptyList()
-        val rec = recognizer ?: return emptyList()
-        val result = rec.process(InputImage.fromBitmap(bmp, 0)).await()
-        val gapX = ceil(OverlayView.PAD_X + 2).toInt()
-        val gapY = ceil(OverlayView.PAD_Y + 2).toInt()
-        val boxes = ArrayList<OverlayView.Box>()
-        for (block in result.textBlocks) {
-            val r = block.boundingBox ?: continue
-            if (!CJK.containsMatchIn(block.text)) continue
-            val screen = Rect(r).apply { offset(cap.left, cap.top) }
-            // The tree already has this text (translated, or deliberately left alone).
-            if (s.items.any { Rect.intersects(it.bounds, screen) }) continue
-            val st = ColorSampler.sampleAround(bmp, r, gapX, gapY) ?: continue
-            if (st === ColorSampler.ON_IMAGE) continue
-            // Chinese has no spaces between words, so join wrapped lines directly.
-            val src = block.lines.joinToString("") { it.text }.trim()
-            if (src.isEmpty()) continue
-            val out = translations.get(src) ?: try {
-                tr.translate(src).await().also { translations.put(src, it) }
-            } catch (e: Exception) {
-                continue
-            }
-            val lineHeights = block.lines.mapNotNull { it.boundingBox?.height() }.sorted()
-            val lineHeight = (lineHeights.getOrNull(lineHeights.size / 2) ?: r.height()).toFloat()
-            val x = screen.left.toFloat()
-            boxes += OverlayView.Box(
-                RectF(
-                    screen.left - OverlayView.PAD_X, screen.top - OverlayView.PAD_Y,
-                    screen.right + OverlayView.PAD_X, screen.bottom + OverlayView.PAD_Y
-                ),
-                out, st.fg, lineHeight, st.bg, st.bgEnd, x + st.bgStartX, x + st.bgEndX,
-                clip = s.window,
-            )
-        }
-        return boxes
-    }
-
     // -------------------------------------------------------- pause / notify
 
     private fun togglePause() {
         paused = !paused
         if (paused) {
             overlay?.setBoxes(emptyList())
-            ocrBoxes = emptyList()
         } else {
             requestRefresh()
         }
@@ -653,7 +535,6 @@ class TranslateAccessibilityService : AccessibilityService() {
         overlay = null
         runCatching { getSystemService(NotificationManager::class.java).cancel(NOTIF_ID) }
         runCatching { translator?.close() }
-        runCatching { recognizer?.close() }
         super.onDestroy()
     }
 }

@@ -43,15 +43,7 @@ class OverlayView(context: Context) : View(context) {
         val maxRight: Float = rect.right,
         val maxBottom: Float = Float.MAX_VALUE,
         val clip: Rect? = null,
-    ) {
-        fun offset(dx: Float, dy: Float): Box = copy(
-            rect = RectF(rect).apply { offset(dx, dy) },
-            bgStartX = bgStartX + dx,
-            bgEndX = bgEndX + dx,
-            maxRight = maxRight + dx,
-            maxBottom = maxBottom + dy,
-        )
-    }
+    )
 
     /** A translation laid out at the origin, ready to be drawn anywhere. */
     private class Prepared(val width: Float, val height: Float, val layout: StaticLayout, val bgPaint: Paint)

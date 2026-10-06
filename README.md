@@ -11,7 +11,6 @@ It is an **accessibility service**, the same Android feature screen readers use.
 3. The first time a piece of text appears, one **screenshot** measures its background and text colours, where the characters actually sit, and how big they are. Text sitting on a photo or banner is left alone.
 4. A touch-transparent **overlay** paints each translation over the Chinese in matching colours (gradients included), sized to fit inside the original element.
 5. When you scroll, Android reports how far, so the translations **move with the page** straight away. Very fast flings hide them for a moment instead.
-6. Android 14+: once the screen settles, **OCR** reads a screenshot of Taobao's window to catch text the accessibility tree doesn't list.
 
 Your taps and scrolls pass straight through to Taobao.
 
@@ -65,7 +64,7 @@ After that it stays on: translations appear whenever Taobao is open. Use the not
 
 - **Text inside product photos and banners** stays in Chinese on purpose: a flat box over a picture looks worse than the original.
 - **Payment and some secure screens** block screenshots. They stay in Chinese.
-- **Android 11 to 13** have no OCR backup, so the few Taobao elements that don't expose their text stay in Chinese.
+- **Text Taobao doesn't list** in the accessibility tree (some custom-drawn elements) stays in Chinese.
 - **New text** (just scrolled in) shows in Chinese for about half a second while its colours are measured and it is translated. Text already seen comes back instantly.
 - **Translation quality** is machine translation of product titles. Expect rough but usable results.
 - **Khmer is not available**: ML Kit's on-device translation does not support it. For Khmer you would need a cloud service (e.g. Google Cloud Translation API), which costs money and needs an API key.
@@ -75,7 +74,7 @@ After that it stays on: translations appear whenever Taobao is open. Use the not
 | File | Purpose |
 |---|---|
 | `MainActivity.kt` | Language choice, language-pack download, setup help, launches Taobao |
-| `TranslateAccessibilityService.kt` | Reads Taobao's text, follows scrolling, screenshots, OCR backup, translation |
+| `TranslateAccessibilityService.kt` | Reads Taobao's text, follows scrolling, screenshots for colours, translation |
 | `ColorSampler.kt` | Measures background and text colours, text position and line height from a screenshot |
 | `OverlayView.kt` | Lays out and draws the translated text boxes |
 | `res/xml/accessibility_service_config.xml` | What the accessibility service is allowed to see and do |
