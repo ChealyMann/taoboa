@@ -21,7 +21,7 @@
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:layout_marginTop="8dp"
-            android:text="Reads Chinese text on your screen and draws the translation over it, live, while you browse Taobao." />
+            android:text="Reads the Chinese text in Taobao and draws the translation over it, live, while you browse." />
 
         <TextView
             android:layout_width="wrap_content"
@@ -42,11 +42,20 @@
             android:text="Start translating Taobao" />
 
         <Button
-            android:id="@+id/stopButton"
+            android:id="@+id/restrictedButton"
+            style="?attr/materialButtonOutlinedStyle"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="8dp"
-            android:text="Stop" />
+            android:text="Allow restricted settings" />
+
+        <Button
+            android:id="@+id/stopButton"
+            style="?attr/materialButtonOutlinedStyle"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="Turn off" />
 
         <TextView
             android:id="@+id/statusText"
@@ -59,12 +68,18 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="24dp"
-            android:text="First run: you will be asked to (1) allow &quot;Display over other apps&quot;, (2) allow notifications, (3) download the language pack (needs internet, once only), and (4) allow screen capture. After that, Taobao opens and translations appear over the Chinese text. Use the notification to pause or stop." />
+            android:text="First run: tap Start. You will be asked to (1) allow notifications, (2) download the language pack (needs internet, once only), and (3) turn on Taobao Live Translate in Accessibility settings. Android warns that it can read your screen: it only reads Taobao, and everything stays on your phone." />
 
         <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="12dp"
-            android:text="Note: Taobao may block screen capture on payment screens. Those screens will stay in Chinese." />
+            android:text="If the switch in Accessibility is greyed out (Android 13 and newer), tap Allow restricted settings above, choose ⋮ then Allow restricted settings, and try again." />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:text="Text printed inside product photos and banners stays in Chinese, and so do payment screens." />
     </LinearLayout>
 </ScrollView>

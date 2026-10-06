@@ -4,6 +4,7 @@ import android.content.Context
 import android.graphics.Canvas
 import android.graphics.LinearGradient
 import android.graphics.Paint
+import android.graphics.Rect
 import android.graphics.RectF
 import android.graphics.Shader
 import android.graphics.Typeface
@@ -11,6 +12,7 @@ import android.text.Layout
 import android.text.StaticLayout
 import android.text.TextPaint
 import android.text.TextUtils
+import android.util.LruCache
 import android.util.TypedValue
 import android.view.View
 import kotlin.math.max
@@ -18,19 +20,50 @@ import kotlin.math.min
 
 /**
  * Full-screen, touch-transparent view that paints translated text on top of the
- * original Chinese text. Each [Box] is one OCR text block in screen coordinates,
- * already padded by [PAD_X]/[PAD_Y]; [Box.lineHeight] is the height of one line
- * of the original text. The background runs from [Box.bg] (left) to [Box.bgEnd].
+ * original Chinese text. Everything is in screen coordinates.
  */
 class OverlayView(context: Context) : View(context) {
 
+    /**
+     * One translated text block. [rect] covers the original text plus [PAD_X]/[PAD_Y].
+     * The translation may widen the box up to [maxRight] and lengthen it down to
+     * [maxBottom]. The background runs left to right from [bg] at [bgStartX] to
+     * [bgEnd] at [bgEndX] (one flat colour when they're equal). Nothing is drawn
+     * outside [clip], the scrolling list the text belongs to.
+     */
     data class Box(
-        val rect: RectF, val text: String, val bg: Int, val bgEnd: Int, val fg: Int, val lineHeight: Float
-    )
+        val rect: RectF,
+        val text: String,
+        val fg: Int,
+        val lineHeight: Float,
+        val bg: Int,
+        val bgEnd: Int = bg,
+        val bgStartX: Float = rect.left,
+        val bgEndX: Float = rect.right,
+        val maxRight: Float = rect.right,
+        val maxBottom: Float = Float.MAX_VALUE,
+        val clip: Rect? = null,
+    ) {
+        fun offset(dx: Float, dy: Float): Box = copy(
+            rect = RectF(rect).apply { offset(dx, dy) },
+            bgStartX = bgStartX + dx,
+            bgEndX = bgEndX + dx,
+            maxRight = maxRight + dx,
+            maxBottom = maxBottom + dy,
+        )
+    }
 
-    private class Prepared(val rect: RectF, val layout: StaticLayout, val bgPaint: Paint)
+    /** A translation laid out at the origin, ready to be drawn anywhere. */
+    private class Prepared(val width: Float, val height: Float, val layout: StaticLayout, val bgPaint: Paint)
 
-    private var prepared: List<Prepared> = emptyList()
+    private class Placed(var x: Float, var y: Float, val clip: Rect?, val prep: Prepared) {
+        fun centreIn(area: Rect) = area.contains((x + prep.width / 2).toInt(), (y + prep.height / 2).toInt())
+    }
+
+    private var placed: List<Placed> = emptyList()
+    private var occluders: List<Rect> = emptyList()
+    // Layouts are reused while the page scrolls, so moving boxes costs nothing.
+    private val cache = LruCache<List<Any>, Prepared>(300)
     private val screenPos = IntArray(2)
     // Condensed fits longer English into the space of the shorter Chinese;
     // medium weight keeps it solid at small sizes.
@@ -38,14 +71,33 @@ class OverlayView(context: Context) : View(context) {
     private val minTextPx = sp(9f)
     private val maxTextPx = sp(20f)
 
-    fun setBoxes(boxes: List<Box>) {
-        prepared = boxes.map { prepare(it, bottomLimit(it, boxes)) }
+    /** Shows [boxes]; nothing is painted over [occluders] (windows in front of Taobao). */
+    fun setBoxes(boxes: List<Box>, occluders: List<Rect> = emptyList()) {
+        this.occluders = occluders
+        placed = boxes.map { Placed(it.rect.left, it.rect.top, it.clip, prepare(it, bottomLimit(it, boxes))) }
         invalidate()
     }
 
-    /** How far down [box] may grow before it would cover the next block below it. */
+    /** Moves the boxes inside [area] along with content that just scrolled. */
+    fun shift(area: Rect, dx: Float, dy: Float) {
+        for (p in placed) {
+            if (p.centreIn(area)) {
+                p.x += dx
+                p.y += dy
+            }
+        }
+        invalidate()
+    }
+
+    /** Removes the boxes inside [area], for content moving too fast to follow. */
+    fun hide(area: Rect) {
+        placed = placed.filterNot { it.centreIn(area) }
+        invalidate()
+    }
+
+    /** How far down [box] may grow: the end of its element, or the next block below it. */
     private fun bottomLimit(box: Box, all: List<Box>): Float {
-        var limit = if (height > 0) height.toFloat() else Float.MAX_VALUE
+        var limit = box.maxBottom
         for (other in all) {
             val o = other.rect
             if (other !== box && o.top > box.rect.centerY() &&
@@ -58,40 +110,49 @@ class OverlayView(context: Context) : View(context) {
     }
 
     private fun prepare(box: Box, maxBottom: Float): Prepared {
-        val width = (box.rect.width() - 2 * PAD_X).toInt().coerceAtLeast(40)
-        val fitHeight = box.rect.height() - 2 * PAD_Y
+        val r = box.rect
+        val key = listOf(
+            box.text, r.width().toInt(), r.height().toInt(), (box.maxRight - r.left).toInt(),
+            (maxBottom - r.top).toInt(), box.fg, box.bg, box.bgEnd,
+            (box.bgStartX - r.left).toInt(), (box.bgEndX - r.left).toInt(), box.lineHeight.toInt()
+        )
+        cache.get(key)?.let { return it }
+
+        // The translation may use the element's full width, not just the width
+        // of the Chinese, which is usually narrower than the English.
+        val maxWidth = (max(r.right, box.maxRight) - r.left - 2 * PAD_X).toInt().coerceAtLeast(40)
+        val fitHeight = r.height() - 2 * PAD_Y
         // Start at the size of the original text, then shrink until the
-        // translation fits inside the original block.
+        // translation fits the original block.
         var size = (box.lineHeight * 0.9f).coerceIn(minTextPx, maxTextPx)
-        var layout = buildLayout(box, size, width, Int.MAX_VALUE)
+        var layout = buildLayout(box, size, maxWidth, Int.MAX_VALUE)
         while (layout.height > fitHeight && size > minTextPx) {
             size = (size - 2f).coerceAtLeast(minTextPx)
-            layout = buildLayout(box, size, width, Int.MAX_VALUE)
+            layout = buildLayout(box, size, maxWidth, Int.MAX_VALUE)
         }
-        // English is usually longer than Chinese. If it still doesn't fit, grow
-        // down into free space only, and end with "…" rather than cover the
-        // block below.
-        val room = maxBottom - box.rect.top - 2 * PAD_Y
+        // If it still doesn't fit, grow down into free space only, and end with
+        // "…" rather than cover anything below.
+        val room = maxBottom - r.top - 2 * PAD_Y
         if (layout.height > room) {
             val lineHeight = layout.height.toFloat() / layout.lineCount
             val lines = (room / lineHeight).toInt().coerceAtLeast(1)
-            layout = buildLayout(box, size, width, lines)
+            layout = buildLayout(box, size, maxWidth, lines)
         }
-        val rect = RectF(box.rect)
-        rect.bottom = max(rect.bottom, rect.top + layout.height + 2 * PAD_Y)
-        return Prepared(rect, layout, backgroundPaint(box, rect))
-    }
 
-    private fun backgroundPaint(box: Box, rect: RectF): Paint = Paint().apply {
-        color = box.bg
-        if (box.bgEnd != box.bg) {
-            // The two colours were sampled around the left and right halves.
-            val quarter = rect.width() / 4f
-            shader = LinearGradient(
-                rect.left + quarter, 0f, rect.right - quarter, 0f,
-                box.bg, box.bgEnd, Shader.TileMode.CLAMP
-            )
+        var textWidth = 0f
+        for (i in 0 until layout.lineCount) textWidth = max(textWidth, layout.getLineWidth(i))
+        val width = max(r.width(), textWidth + 2 * PAD_X)
+        val height = max(r.height(), layout.height + 2 * PAD_Y)
+        val paint = Paint().apply {
+            color = box.bg
+            if (box.bgEnd != box.bg) {
+                shader = LinearGradient(
+                    box.bgStartX - r.left, 0f, box.bgEndX - r.left, 0f,
+                    box.bg, box.bgEnd, Shader.TileMode.CLAMP
+                )
+            }
         }
+        return Prepared(width, height, layout, paint).also { cache.put(key, it) }
     }
 
     private fun buildLayout(box: Box, sizePx: Float, width: Int, maxLines: Int): StaticLayout {
@@ -115,14 +176,17 @@ class OverlayView(context: Context) : View(context) {
         // Boxes are in screen coordinates; undo any offset of this window.
         getLocationOnScreen(screenPos)
         canvas.translate(-screenPos[0].toFloat(), -screenPos[1].toFloat())
-        for (p in prepared) {
-            // Square edges: the box matches the page colour, so it vanishes into it.
-            canvas.drawRect(p.rect, p.bgPaint)
+        // Never paint over the keyboard, status bar or pop-ups from other apps.
+        for (o in occluders) canvas.clipOutRect(o)
+        for (p in placed) {
             canvas.save()
+            p.clip?.let { canvas.clipRect(it) }
+            canvas.translate(p.x, p.y)
+            // Square edges: the box matches the page colour, so it vanishes into it.
+            canvas.drawRect(0f, 0f, p.prep.width, p.prep.height, p.prep.bgPaint)
             // Centre vertically so short labels sit where the original text was.
-            val dy = (p.rect.height() - p.layout.height) / 2f
-            canvas.translate(p.rect.left + PAD_X, p.rect.top + dy)
-            p.layout.draw(canvas)
+            canvas.translate(PAD_X, (p.prep.height - p.prep.layout.height) / 2f)
+            p.prep.layout.draw(canvas)
             canvas.restore()
         }
     }

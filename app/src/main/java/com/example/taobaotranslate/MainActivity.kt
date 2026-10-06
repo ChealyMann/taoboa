@@ -1,14 +1,14 @@
 package com.example.taobaotranslate
 
 import android.Manifest
-import android.content.Context
+import android.content.ComponentName
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.media.projection.MediaProjectionManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
+import android.view.View
 import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.Spinner
@@ -16,7 +16,6 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
-import androidx.core.content.ContextCompat
 import com.google.mlkit.common.model.DownloadConditions
 import com.google.mlkit.nl.translate.TranslateLanguage
 import com.google.mlkit.nl.translate.Translation
@@ -34,27 +33,14 @@ class MainActivity : AppCompatActivity() {
         .filter { it != TranslateLanguage.CHINESE }
         .sortedBy { displayName(it) }
 
+    private val prefs by lazy {
+        getSharedPreferences(TranslateAccessibilityService.PREFS, MODE_PRIVATE)
+    }
+
     private val notificationLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) {
-            // Granted or not, continue; the service still runs without a visible notification.
-            downloadThenCapture()
-        }
-
-    private val projectionLauncher =
-        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
-            val data = result.data
-            if (result.resultCode == RESULT_OK && data != null) {
-                val intent = Intent(this, TranslateService::class.java)
-                    .setAction(TranslateService.ACTION_START)
-                    .putExtra(TranslateService.EXTRA_RESULT_CODE, result.resultCode)
-                    .putExtra(TranslateService.EXTRA_DATA, data)
-                    .putExtra(TranslateService.EXTRA_LANG, selectedLanguage())
-                ContextCompat.startForegroundService(this, intent)
-                openTaobao()
-            } else {
-                setStatus("Screen capture was not allowed, so nothing can be translated.")
-                startButton.isEnabled = true
-            }
+            // Granted or not, continue; translation works without the notification.
+            downloadThenContinue()
         }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -68,55 +54,51 @@ class MainActivity : AppCompatActivity() {
         languageSpinner.adapter = ArrayAdapter(
             this, android.R.layout.simple_spinner_dropdown_item, languages.map { displayName(it) }
         )
-        val saved = getPreferences(Context.MODE_PRIVATE)
-            .getString(PREF_LANG, TranslateLanguage.ENGLISH) ?: TranslateLanguage.ENGLISH
+        val saved = prefs.getString(TranslateAccessibilityService.PREF_LANG, TranslateLanguage.ENGLISH)
+            ?: TranslateLanguage.ENGLISH
         languageSpinner.setSelection(languages.indexOf(saved).coerceAtLeast(0))
 
         startButton.setOnClickListener { onStartClicked() }
+
+        // Android 13+ hides accessibility switches of apps installed from an APK
+        // file until "Allow restricted settings" is chosen on the app info page.
+        val restrictedButton = findViewById<Button>(R.id.restrictedButton)
+        restrictedButton.visibility = if (Build.VERSION.SDK_INT >= 33) View.VISIBLE else View.GONE
+        restrictedButton.setOnClickListener {
+            startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName")))
+            Toast.makeText(
+                this, "Tap ⋮ (top right), then \"Allow restricted settings\".", Toast.LENGTH_LONG
+            ).show()
+        }
+
         findViewById<Button>(R.id.stopButton).setOnClickListener {
-            startService(Intent(this, TranslateService::class.java).setAction(TranslateService.ACTION_STOP))
-            setStatus("Stopped.")
+            sendBroadcast(Intent(TranslateAccessibilityService.ACTION_TURN_OFF).setPackage(packageName))
+            setStatus("Turned off. Tap Start to turn it back on.")
         }
     }
 
     override fun onResume() {
         super.onResume()
         setStatus(
-            if (TranslateService.running) "Translating. Use the notification to pause or stop."
-            else "Ready."
+            if (serviceEnabled()) "On. Translations appear whenever Taobao is open. Use the notification to pause."
+            else "Off. Tap Start to set it up."
         )
     }
 
     // ------------------------------------------------------------------ flow
 
     private fun onStartClicked() {
-        if (TranslateService.running) {
-            openTaobao()
-            return
-        }
-        if (!Settings.canDrawOverlays(this)) {
-            startActivity(
-                Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))
-            )
-            Toast.makeText(
-                this, "Allow \"Display over other apps\", then come back and tap Start again.",
-                Toast.LENGTH_LONG
-            ).show()
-            return
-        }
         if (Build.VERSION.SDK_INT >= 33 &&
             checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
         ) {
             notificationLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
             return
         }
-        downloadThenCapture()
+        downloadThenContinue()
     }
 
-    private fun downloadThenCapture() {
+    private fun downloadThenContinue() {
         val lang = selectedLanguage()
-        getPreferences(Context.MODE_PRIVATE).edit().putString(PREF_LANG, lang).apply()
-
         startButton.isEnabled = false
         setStatus("Downloading language packs (first time only, needs internet)...")
 
@@ -129,29 +111,46 @@ class MainActivity : AppCompatActivity() {
         translator.downloadModelIfNeeded(DownloadConditions.Builder().build())
             .addOnSuccessListener {
                 translator.close()
-                setStatus("Waiting for screen capture permission...")
-                val mpm = getSystemService(MediaProjectionManager::class.java)
-                projectionLauncher.launch(mpm.createScreenCaptureIntent())
+                startButton.isEnabled = true
+                // A running service picks the new language up straight away.
+                prefs.edit().putString(TranslateAccessibilityService.PREF_LANG, lang).apply()
+                if (serviceEnabled()) openTaobao() else openAccessibilitySettings()
             }
             .addOnFailureListener { e ->
                 translator.close()
-                setStatus("Language pack download failed: ${e.message}")
                 startButton.isEnabled = true
+                setStatus("Language pack download failed: ${e.message}")
             }
     }
 
+    private fun openAccessibilitySettings() {
+        setStatus("Turn on \"Taobao Live Translate\" in Accessibility, then come back and tap Start.")
+        startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+        Toast.makeText(
+            this,
+            "Find \"Taobao Live Translate\" (often under Installed or Downloaded apps) and turn it on. " +
+                "If it's greyed out, use \"Allow restricted settings\" first.",
+            Toast.LENGTH_LONG
+        ).show()
+    }
+
     private fun openTaobao() {
-        startButton.isEnabled = true
-        val launch = packageManager.getLaunchIntentForPackage(TAOBAO_PACKAGE)
+        val launch = packageManager.getLaunchIntentForPackage(TranslateAccessibilityService.TAOBAO_PACKAGE)
         if (launch != null) {
             startActivity(launch)
         } else {
             Toast.makeText(this, "Taobao isn't installed. Open it yourself.", Toast.LENGTH_LONG).show()
-            moveTaskToBack(true)
         }
     }
 
     // --------------------------------------------------------------- helpers
+
+    private fun serviceEnabled(): Boolean {
+        val enabled = Settings.Secure.getString(contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES)
+            ?: return false
+        val me = ComponentName(this, TranslateAccessibilityService::class.java)
+        return enabled.split(':').any { ComponentName.unflattenFromString(it) == me }
+    }
 
     private fun selectedLanguage(): String =
         languages.getOrElse(languageSpinner.selectedItemPosition) { TranslateLanguage.ENGLISH }
@@ -161,10 +160,5 @@ class MainActivity : AppCompatActivity() {
 
     private fun setStatus(text: String) {
         statusText.text = text
-    }
-
-    private companion object {
-        const val PREF_LANG = "target_lang"
-        const val TAOBAO_PACKAGE = "com.taobao.taobao"
     }
 }

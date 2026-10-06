@@ -1,14 +1,17 @@
 # Taobao Live Translate (Android)
 
-Reads the Chinese text on your screen while you use Taobao and draws the translation directly over it, live. Everything runs on your phone (OCR and translation), so it is free and works offline after a one-time language-pack download.
+Reads the Chinese text in the Taobao app and draws the translation directly over it, live. Everything runs on your phone (reading and translation), so it is free and works offline after a one-time language-pack download.
 
 ## How it works
 
-1. **Screen capture** (MediaProjection) grabs frames of whatever is on screen.
-2. **Change detection** compares small fingerprints of frames, so OCR only runs when you scroll or open a new page.
-3. **ML Kit Chinese OCR** finds text blocks and their positions.
-4. **ML Kit Translate** translates each block (results are cached).
-5. A touch-transparent **overlay** paints the translation on top of the original Chinese, with a background colour sampled from the page so it stays readable.
+It is an **accessibility service**, the same Android feature screen readers use.
+
+1. Android hands it Taobao's **on-screen text with exact positions** (the accessibility tree), so there is no guessing from pixels.
+2. **ML Kit Translate** translates each piece of text on the phone (results are cached).
+3. The first time a piece of text appears, one **screenshot** measures its background and text colours, where the characters actually sit, and how big they are. Text sitting on a photo or banner is left alone.
+4. A touch-transparent **overlay** paints each translation over the Chinese in matching colours (gradients included), sized to fit inside the original element.
+5. When you scroll, Android reports how far, so the translations **move with the page** straight away. Very fast flings hide them for a moment instead.
+6. Android 14+: once the screen settles, **OCR** reads a screenshot of Taobao's window to catch text the accessibility tree doesn't list.
 
 Your taps and scrolls pass straight through to Taobao.
 
@@ -35,25 +38,29 @@ If the run fails, open it and copy the red error text; it usually points straigh
 
 Tap **Start translating Taobao**. You will be asked, in order, to:
 
-1. Allow **Display over other apps** (then tap Start again).
-2. Allow **notifications**.
-3. Let it **download the language pack** (once, needs internet).
-4. Allow **screen capture** ("Start now").
+1. Allow **notifications** (for the Pause and Turn off buttons).
+2. Let it **download the language pack** (once, needs internet).
+3. Turn on **Taobao Live Translate** in Accessibility settings. It is often listed under "Installed apps" or "Downloaded apps". Android warns that the app can see your screen; it only acts on Taobao and nothing leaves your phone.
 
-Taobao then opens with translations over the Chinese text. Use the notification's **Pause** and **Stop** buttons. Pause when watching videos or live streams, since constantly changing content makes the overlay refresh a lot.
+**Android 13 and newer:** if the switch is greyed out ("Restricted setting"), go back to the app, tap **Allow restricted settings**, choose **⋮ > Allow restricted settings** on the page that opens, then turn the service on.
+
+After that it stays on: translations appear whenever Taobao is open. Use the notification's **Pause** and **Turn off** buttons, or the **Turn off** button in the app. Changing the language in the app and tapping Start switches it immediately.
 
 ## Known limits
 
-- **Payment and some secure screens** block screen capture. They stay in Chinese.
+- **Text inside product photos and banners** stays in Chinese on purpose: a flat box over a picture looks worse than the original.
+- **Payment and some secure screens** block screenshots. They stay in Chinese.
+- **Android 11 to 13** have no OCR backup, so the few Taobao elements that don't expose their text stay in Chinese.
+- **New text** (just scrolled in) shows in Chinese for about half a second while its colours are measured and it is translated. Text already seen comes back instantly.
 - **Translation quality** is machine translation of product titles. Expect rough but usable results.
-- **Short delay**: after a scroll stops, translations take about a second to appear. While a page is scrolling you will briefly see the original Chinese.
-- **Portrait only**: the overlay is sized for portrait orientation.
 - **Khmer is not available**: ML Kit's on-device translation does not support it. For Khmer you would need a cloud service (e.g. Google Cloud Translation API), which costs money and needs an API key.
 
 ## Files
 
 | File | Purpose |
 |---|---|
-| `MainActivity.kt` | Permissions, language choice, language-pack download, launches the service and Taobao |
-| `TranslateService.kt` | Screen capture, change detection, OCR, translation, overlay management |
-| `OverlayView.kt` | Draws translated text boxes |
+| `MainActivity.kt` | Language choice, language-pack download, setup help, launches Taobao |
+| `TranslateAccessibilityService.kt` | Reads Taobao's text, follows scrolling, screenshots, OCR backup, translation |
+| `ColorSampler.kt` | Measures background and text colours, text position and line height from a screenshot |
+| `OverlayView.kt` | Lays out and draws the translated text boxes |
+| `res/xml/accessibility_service_config.xml` | What the accessibility service is allowed to see and do |

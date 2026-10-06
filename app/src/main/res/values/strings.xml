@@ -1,4 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Taobao Live Translate</string>
+    <string name="accessibility_description">Reads the Chinese text in the Taobao app and draws a translation over it. It only acts on Taobao, and the reading and translating happen on your phone.</string>
 </resources>
