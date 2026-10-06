@@ -29,7 +29,12 @@ jobs:
       - name: Load signing key
         env:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
         run: |
+          if [ -z "$KEYSTORE_PASSWORD" ]; then
+            echo "::error::Missing the KEYSTORE_PASSWORD repository secret. See README, 'Automatic updates'."
+            exit 1
+          fi
           if [ -z "$KEYSTORE_BASE64" ]; then
             echo "::error::Missing the KEYSTORE_BASE64 and KEYSTORE_PASSWORD repository secrets. See README, 'Automatic updates'."
             exit 1
