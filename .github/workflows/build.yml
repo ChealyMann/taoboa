@@ -45,6 +45,13 @@ jobs:
             echo "::error::KEYSTORE_BASE64 is not valid: got ${#clean} characters, expected 5712. Paste the whole of signing/KEYSTORE_BASE64.txt again."
             exit 1
           fi
+          echo "Key file fingerprint: $(sha256sum "$RUNNER_TEMP/release.jks" | cut -c1-12)"
+          pass=$(printf '%s' "$KEYSTORE_PASSWORD" | tr -d ' \r\n\t')
+          if ! keytool -certreq -alias taobaotranslate -keystore "$RUNNER_TEMP/release.jks" \
+               -storepass "$pass" -keypass "$pass" > /dev/null 2>&1; then
+            echo "::error::KEYSTORE_PASSWORD does not open the key: got ${#pass} characters, expected 24. Paste the whole of signing/KEYSTORE_PASSWORD.txt again."
+            exit 1
+          fi
 
       - name: Build release APK
         env:
