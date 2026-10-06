@@ -25,9 +25,9 @@ android {
         if (keystore != null) {
             create("release") {
                 storeFile = file(keystore)
-                storePassword = System.getenv("SIGNING_PASSWORD")
+                storePassword = System.getenv("SIGNING_PASSWORD")?.trim()
                 keyAlias = "taobaotranslate"
-                keyPassword = System.getenv("SIGNING_PASSWORD")
+                keyPassword = System.getenv("SIGNING_PASSWORD")?.trim()
             }
         }
     }
