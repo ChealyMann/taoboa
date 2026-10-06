@@ -343,10 +343,14 @@ class TranslateAccessibilityService : AccessibilityService() {
         val stats = TreeStats()
         collect(taobaoRoot, window, items, 0, stats)
         val unique = dedupe(items)
-        val report = "$windowsText\nUsing window ${taobao.id} ${window.toShortString()}\n" +
+        // A shrunken window means Taobao is animating (recent apps, closing):
+        // keep the last report from when it was open properly.
+        val animating = window.width() < metrics.widthPixels * 95 / 100
+        val report = if (animating) null else "$windowsText\nUsing window ${taobao.id} ${window.toShortString()}\n" +
             "Nodes: ${stats.nodes}, hidden: ${stats.hidden}, with text: ${stats.withText}, " +
             "WebViews: ${stats.webViews}, Chinese items: ${items.size} (${unique.size} after merging)\n" +
-            "Text seen:\n${stats.samples.joinToString("\n")}\n"
+            "Text seen:\n${stats.samples.joinToString("\n")}\n" +
+            "Elements:\n${stats.tree.joinToString("\n")}\n"
         return Snapshot(window, taobao.id, unique, occluders, report)
     }
 
@@ -357,11 +361,19 @@ class TranslateAccessibilityService : AccessibilityService() {
         var withText = 0
         var webViews = 0
         val samples = ArrayList<String>()
+        val tree = ArrayList<String>()
     }
 
     private fun collect(node: AccessibilityNodeInfo, clip: Rect, out: MutableList<Item>, depth: Int, stats: TreeStats) {
         stats.nodes++
         if (node.className?.contains("WebView") == true) stats.webViews++
+        if (stats.tree.size < 40) {
+            val b = Rect().also { node.getBoundsInScreen(it) }
+            stats.tree += "  " + "-".repeat(minOf(depth, 12)) +
+                "${node.className?.toString()?.substringAfterLast('.')} ${b.toShortString()} " +
+                "children=${node.childCount} visible=${node.isVisibleToUser} " +
+                "text=${!node.text.isNullOrBlank()} desc=${!node.contentDescription.isNullOrBlank()}"
+        }
         if (depth > 80 || !node.isVisibleToUser) {
             stats.hidden++
             return
